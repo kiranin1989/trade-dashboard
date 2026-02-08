@@ -4,23 +4,20 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
 def parse_ibkr_xml(xml_content: str) -> dict:
-    """
-    Parses IBKR Flex Query XML content into a dictionary of DataFrames.
-    Includes Multiplier for correct Options P&L.
-    """
     try:
         root = ET.fromstring(xml_content)
         trades_data = []
-
+        
         for trade in root.findall(".//Trade"):
             strike = trade.get('strike')
             strike_val = float(strike) if strike else None
-
-            # IBKR Multiplier (Default to 1 if missing/stock)
-            mult = float(trade.get('multiplier') or 1)
-
+            
+            # Extract Multiplier (Default to 1.0 for Stocks)
+            raw_mult = trade.get('multiplier')
+            multiplier = float(raw_mult) if raw_mult else 1.0
+            
+            # ORDER MUST MATCH DATABASE.PY EXACTLY
             trades_data.append({
                 'trade_id': trade.get('tradeID'),
                 'symbol': trade.get('symbol'),
@@ -32,7 +29,7 @@ def parse_ibkr_xml(xml_content: str) -> dict:
                 'commission': float(trade.get('ibCommission') or 0),
                 'realized_pnl': 0.0,
                 'currency': 'USD',
-                'flex_query_run_id': str(mult),  # Temporary hijacking this col to store multiplier for now
+                'flex_query_run_id': '', 
                 'buy_sell': trade.get('buySell'),
                 'open_close': trade.get('openCloseIndicator'),
                 'close_price': float(trade.get('closePrice') or 0),
@@ -40,11 +37,25 @@ def parse_ibkr_xml(xml_content: str) -> dict:
                 'strike': strike_val,
                 'expiry': trade.get('expiry'),
                 'put_call': trade.get('putCall'),
+                'multiplier': multiplier # <--- Mapped to new column
+            })
+        
+        cash_data = []
+        for ct in root.findall(".//CashTransaction"):
+            cash_data.append({
+                'transaction_id': ct.get('transactionID'),
+                'type': ct.get('type'),
+                'asset_class': ct.get('assetCategory'),
+                'symbol': ct.get('symbol'),
+                'amount': float(ct.get('amount') or 0),
+                'date': ct.get('dateTime'),
+                'description': ct.get('description'),
+                'currency': 'USD' 
             })
 
         return {
             'trades': pd.DataFrame(trades_data),
-            'transactions': pd.DataFrame()  # Simplified for now
+            'transactions': pd.DataFrame(cash_data)
         }
     except Exception as e:
         logger.error(f"XML Parsing failed: {e}")
