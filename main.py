@@ -5,7 +5,7 @@ from config import settings
 from core.ibkr_client import IBKRFlexClient
 from core.database import DatabaseManager
 from core.parser import parse_ibkr_xml
-from core.logic import PnLEngine  # <--- New Import
+from core.logic import PnLEngine
 
 # Configure Logging
 logging.basicConfig(
@@ -42,40 +42,47 @@ def run_pipeline(fetch_new=False):
     # --- LOGIC ENGINE STEP ---
     logger.info("--- Starting P&L Calculation ---")
 
-    # 1. Load Executions from DB
     conn = db.get_connection()
     try:
-        raw_trades_df = conn.execute("SELECT * FROM trades").df()
+        # Load executions, excluding Cash/Forex pairs like USD.CAD
+        raw_trades_df = conn.execute("""
+            SELECT * FROM trades 
+            WHERE asset_class NOT IN ('CASH')
+            AND symbol NOT LIKE '%.%'
+        """).df()
 
         if raw_trades_df.empty:
-            logger.warning("No trades found in database.")
+            logger.warning("No trades found in database (after filtering out CASH/Forex).")
             return
 
         logger.info(f"Loaded {len(raw_trades_df)} raw executions.")
 
-        # 2. Run FIFO Engine
-        pnl_df = PnLEngine.calculate_fifo_pnl(raw_trades_df)
+        # Run FIFO Engine
+        closed_df, open_df = PnLEngine.calculate_fifo_pnl(raw_trades_df)
 
-        if not pnl_df.empty:
-            total_realized = pnl_df['net_pnl'].sum()
-            total_trades = len(pnl_df)
+        if not closed_df.empty:
+            print("\n--- PERFORMANCE SUMMARY ---")
+            print(f"Total Closed Trades: {len(closed_df)}")
+            print(f"Total Realized P&L: ${closed_df['net_pnl'].sum():,.2f}")
+            print(f"Total Open Assets:   {len(open_df)}")
 
-            logger.info("--- RESULTS ---")
-            logger.info(f"Total Closed Trades: {total_trades}")
-            logger.info(f"Total Realized P&L: ${total_realized:,.2f}")
+            # --- OPEN STOCKS ---
+            stocks_open = open_df[~open_df['asset_id'].str.contains(' ')]
+            if not stocks_open.empty:
+                print("\n--- OPEN STOCK POSITIONS ---")
+                print(stocks_open.sort_values('quantity', ascending=False))
 
-            # Show top winning trade
-            best_trade = pnl_df.loc[pnl_df['net_pnl'].idxmax()]
-            logger.info(f"Best Trade: {best_trade['symbol']} (${best_trade['net_pnl']:,.2f})")
+            # --- OPEN OPTIONS ---
+            # Options asset_id contains spaces: "CCJ 20250919 75.0 P"
+            options_open = open_df[open_df['asset_id'].str.contains(' ')]
+            if not options_open.empty:
+                print("\n--- OPEN OPTION POSITIONS ---")
+                print(options_open.sort_values('quantity', ascending=False))
+            else:
+                print("\n--- NO OPEN OPTION POSITIONS ---")
 
-            # Show top losing trade
-            worst_trade = pnl_df.loc[pnl_df['net_pnl'].idxmin()]
-            logger.info(f"Worst Trade: {worst_trade['symbol']} (${worst_trade['net_pnl']:,.2f})")
-
-            # Optional: Save this processed data back to DB?
-            # db.save_dataframe('closed_trades', pnl_df)
         else:
-            logger.info("No closed trades generated (perhaps only open positions exists).")
+            logger.info("No closed trades generated.")
 
     except Exception as e:
         logger.error(f"Logic Engine failed: {e}")
@@ -84,5 +91,5 @@ def run_pipeline(fetch_new=False):
 
 
 if __name__ == "__main__":
-    # Set fetch_new=False to test logic on existing data without spamming IBKR
+    # Usually fetch_new=True once to get data, then False to iterate on logic
     run_pipeline(fetch_new=False)

@@ -6,153 +6,76 @@ logger = logging.getLogger(__name__)
 
 
 class PnLEngine:
-    """
-    Core Financial Logic.
-    Calculates Realized P&L using FIFO (First-In-First-Out) methodology.
-    """
+    @staticmethod
+    def _generate_asset_key(row):
+        asset_class = str(row.get('asset_class', ''))
+        if 'OPT' in asset_class or 'FOP' in asset_class:
+            root = row.get('underlying') if row.get('underlying') else row.get('symbol')
+            return f"{root} {row.get('expiry')} {row.get('strike')} {row.get('put_call')}"
+        return row.get('symbol')
 
     @staticmethod
-    def calculate_fifo_pnl(trades_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Process a DataFrame of raw executions and return a DataFrame of CLOSED trades with P&L.
-
-        Expected Input Columns:
-        - symbol, asset_class, trade_date, quantity, price, commission, buy_sell
-
-        Returns:
-        - DataFrame with [symbol, close_date, quantity, entry_price, exit_price, gross_pnl, net_pnl]
-        """
+    def calculate_fifo_pnl(trades_df: pd.DataFrame):
         if trades_df.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame()
 
-        # Ensure sorted by date
         trades_df = trades_df.sort_values(by='trade_date')
-
         closed_trades = []
+        portfolio = {}  # Key -> deque of open lots
 
-        # We need to track inventory per symbol
-        # Structure: { 'AAPL': deque([ {'qty': 10, 'price': 150, 'date': ...}, ... ]) }
-        portfolio = {}
+        for _, row in trades_df.iterrows():
+            asset_key = PnLEngine._generate_asset_key(row)
+            qty = float(row['quantity'])
+            price = float(row['price'])
+            comm = float(row['commission'])
+            # We stored multiplier in flex_query_run_id in the parser update
+            multiplier = float(row['flex_query_run_id']) if row['flex_query_run_id'] else 1.0
 
-        for index, row in trades_df.iterrows():
-            symbol = row['symbol']
-            qty = row['quantity']  # Positive for Buy (usually), check buy_sell logic below if needed
-            price = row['price']
-            date = row['trade_date']
-            comm = row['commission']
-
-            # Normalize Quantity based on Buy/Sell if IBKR data is absolute
-            # (In your parser, you might want to ensure 'SLD'/'SELL' makes quantity negative if it isn't already)
-            # Assuming here: Signed quantity is not guaranteed, so we check Buy/Sell
-            if row['buy_sell'] == 'SELL' and qty > 0:
+            if str(row['buy_sell']).upper() in ['SELL', 'SLD'] and qty > 0:
                 qty = -qty
 
-            if symbol not in portfolio:
-                portfolio[symbol] = deque()
+            if asset_key not in portfolio:
+                portfolio[asset_key] = deque()
+            inventory = portfolio[asset_key]
 
-            inventory = portfolio[symbol]
-
-            # CASE 1: Opening or Adding to Position (Same sign)
-            # If inventory is empty, or new trade has same sign as inventory (Long+Long or Short+Short)
+            # Match FIFO
             if not inventory or (inventory[0]['qty'] > 0 and qty > 0) or (inventory[0]['qty'] < 0 and qty < 0):
-                inventory.append({
-                    'qty': qty,
-                    'price': price,
-                    'date': date,
-                    'comm_per_share': comm / abs(qty) if qty != 0 else 0
-                })
-
-            # CASE 2: Closing Position (Opposite sign)
+                inventory.append(
+                    {'qty': qty, 'price': price, 'date': row['trade_date'], 'mult': multiplier, 'comm_total': comm})
             else:
-                remaining_qty = qty  # E.g., Selling -50
-
+                remaining_qty = qty
                 while remaining_qty != 0 and inventory:
-                    match_lot = inventory[0]  # FIFO: Look at oldest lot
-
-                    # Determine how much we can match
-                    # If matching -50 against +100, we match 50.
-                    # If matching -50 against +20, we match 20 and look for next lot.
-
-                    if abs(remaining_qty) >= abs(match_lot['qty']):
-                        # We exhaust this lot completely
-                        matched_q = match_lot['qty']
-                        entry_price = match_lot['price']
-                        entry_date = match_lot['date']
-
-                        # Remove this lot from inventory
+                    lot = inventory[0]
+                    if abs(remaining_qty) >= abs(lot['qty']):
+                        matched_q = lot['qty']
                         inventory.popleft()
+                        remaining_qty -= (-matched_q)
 
-                        # Adjust remaining to close
-                        remaining_qty -= (-matched_q)  # e.g. -50 - (-20) = -30
-
-                        # Record the P&L
-                        # P&L = (Exit Price - Entry Price) * Quantity
-                        # Note: If Long (+), Exit is Sell (-).
-                        # Calculation: (ExitPrice - EntryPrice) * MatchedQty (Positive)
-                        # Wait, easier math: (Price_Now - Price_Old) * Direction?
-
-                        # Let's match standard formula: (SellPrice - BuyPrice) * Qty
-                        if matched_q > 0:  # We were Long, now Selling
-                            pnl = (price - entry_price) * abs(matched_q)
-                        else:  # We were Short, now Buying
-                            pnl = (entry_price - price) * abs(matched_q)
-
+                        pnl = (price - lot['price']) * abs(matched_q) * lot['mult'] * (1 if matched_q > 0 else -1)
                         closed_trades.append({
-                            'symbol': symbol,
-                            'entry_date': entry_date,
-                            'close_date': date,
-                            'quantity': abs(matched_q),
-                            'entry_price': entry_price,
-                            'exit_price': price,
-                            'gross_pnl': pnl,
-                            # Allocate commission proportionally (This trade comm + Prorated Entry comm)
-                            'commission': (comm * (abs(matched_q) / abs(qty))) + (
-                                        match_lot['comm_per_share'] * abs(matched_q)),
-                            'asset_class': row['asset_class']
+                            'symbol': row['symbol'], 'asset_id': asset_key, 'close_date': row['trade_date'],
+                            'quantity': abs(matched_q), 'net_pnl': pnl - abs(comm * (matched_q / qty))
                         })
-
                     else:
-                        # Partial Close: We only close a portion of the oldest lot
-                        # Trade is -10, Lot is +100. We close 10.
-                        matched_q = -remaining_qty  # The amount we are closing
-
-                        match_lot['qty'] -= matched_q  # Reduce lot size
-
-                        entry_price = match_lot['price']
-
-                        if matched_q > 0:  # We were Long
-                            pnl = (price - entry_price) * abs(matched_q)
-                        else:
-                            pnl = (entry_price - price) * abs(matched_q)
-
+                        matched_q = -remaining_qty
+                        lot['qty'] -= matched_q
+                        pnl = (price - lot['price']) * abs(matched_q) * lot['mult'] * (1 if matched_q > 0 else -1)
                         closed_trades.append({
-                            'symbol': symbol,
-                            'entry_date': match_lot['date'],
-                            'close_date': date,
-                            'quantity': abs(matched_q),
-                            'entry_price': entry_price,
-                            'exit_price': price,
-                            'gross_pnl': pnl,
-                            'commission': (comm * (abs(matched_q) / abs(qty))) + (
-                                        match_lot['comm_per_share'] * abs(matched_q)),
-                            'asset_class': row['asset_class']
+                            'symbol': row['symbol'], 'asset_id': asset_key, 'close_date': row['trade_date'],
+                            'quantity': abs(matched_q), 'net_pnl': pnl - abs(comm * (matched_q / qty))
                         })
-
                         remaining_qty = 0
-
-                # If we exhausted inventory but still have quantity left, it becomes a new open position
-                # (e.g. We had +10 Long, we Sold -50. Result: -40 Short position)
                 if remaining_qty != 0:
-                    inventory.append({
-                        'qty': remaining_qty,
-                        'price': price,
-                        'date': date,
-                        'comm_per_share': comm / abs(qty) if qty != 0 else 0
-                    })
+                    inventory.append(
+                        {'qty': remaining_qty, 'price': price, 'date': row['trade_date'], 'mult': multiplier,
+                         'comm_total': comm})
 
-        # Create DataFrame
-        results_df = pd.DataFrame(closed_trades)
-        if not results_df.empty:
-            results_df['net_pnl'] = results_df['gross_pnl'] - results_df['commission']
+        # Calculate Open Positions
+        open_pos_list = []
+        for asset_id, lots in portfolio.items():
+            total_qty = sum(l['qty'] for l in lots)
+            if abs(total_qty) > 0.00001:
+                avg_price = sum(l['price'] * abs(l['qty']) for l in lots) / abs(total_qty)
+                open_pos_list.append({'asset_id': asset_id, 'quantity': total_qty, 'avg_price': avg_price})
 
-        return results_df
+        return pd.DataFrame(closed_trades), pd.DataFrame(open_pos_list)
