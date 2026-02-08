@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as ui_plot
 from core.data_service import DataService
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 # Page Config
 st.set_page_config(page_title="IBKR Trading Dashboard", layout="wide")
@@ -12,79 +11,125 @@ st.title("📈 Trading Performance Dashboard")
 # Initialize Data Service
 data_service = DataService()
 
-# 1. Sidebar Controls
+# --- SIDEBAR CONTROLS ---
 st.sidebar.header("Controls")
-if st.sidebar.button("🔄 Sync with IBKR"):
-    with st.spinner("Fetching latest data..."):
-        # We can call the main.py pipeline here in the future
-        st.sidebar.success("Sync logic triggered!")
 
-# Load Data
+# 1. Date Presets
+st.sidebar.subheader("Time Period")
+time_period = st.sidebar.selectbox(
+    "Select Period",
+    ["YTD", "Last Year", "MTD", "WTD", "Since Inception", "Custom"]
+)
+
+# Date Calculation Logic
+today = datetime.now().date()
+start_date = None
+end_date = today
+
+if time_period == "YTD":
+    start_date = date(today.year, 1, 1)
+elif time_period == "Last Year":
+    start_date = date(today.year - 1, 1, 1)
+    end_date = date(today.year - 1, 12, 31)
+elif time_period == "MTD":
+    start_date = date(today.year, today.month, 1)
+elif time_period == "WTD":
+    # Monday of current week
+    start_date = today - timedelta(days=today.weekday())
+elif time_period == "Since Inception":
+    start_date = None  # Will be set to min_date of data
+
+# Custom Date Picker
+if time_period == "Custom":
+    date_range = st.sidebar.date_input("Custom Range", [today - timedelta(days=30), today])
+    if len(date_range) == 2:
+        start_date, end_date = date_range
+
+# --- LOAD DATA ---
 closed_df, open_df = data_service.get_processed_data()
 
 if closed_df.empty:
-    st.warning("No trading data found. Please sync with IBKR or check your database.")
+    st.warning("No trading data found. Please run main.py to fetch data.")
 else:
-    # 2. Sidebar Filters
-    st.sidebar.subheader("Filters")
+    # Handle 'Since Inception' if selected
+    if start_date is None:
+        start_date = closed_df['close_date'].min().date()
 
-    # Symbol Filter
-    all_symbols = sorted(closed_df['symbol'].unique())
-    selected_symbols = st.sidebar.multiselect("Filter by Symbol", all_symbols)
+    # 2. Filter Logic
+    mask = (closed_df['close_date'].dt.date >= start_date) & (closed_df['close_date'].dt.date <= end_date)
+    filtered_df = closed_df.loc[mask].copy()
 
-    # Asset Class Filter
-    asset_types = st.sidebar.multiselect("Asset Type", ["Stocks", "Options"], default=["Stocks", "Options"])
+    # 3. Symbol Filter (Using ROOT SYMBOL)
+    # Extract unique root symbols for the dropdown
+    all_roots = sorted(filtered_df['root_symbol'].astype(str).unique())
+    selected_roots = st.sidebar.multiselect("Filter by Ticker", all_roots)
 
-    # Date Filter
-    min_date = closed_df['close_date'].min().date()
-    max_date = closed_df['close_date'].max().date()
-    date_range = st.sidebar.date_input("Date Range", [min_date, max_date])
+    if selected_roots:
+        filtered_df = filtered_df[filtered_df['root_symbol'].isin(selected_roots)]
 
-    # Apply Filters
-    df = data_service.apply_filters(closed_df, selected_symbols, date_range, asset_types)
-
-    # 3. Top Level Metrics
+    # --- TOP METRICS ---
+    st.markdown(f"### Performance ({time_period})")
     m1, m2, m3, m4 = st.columns(4)
-    total_pnl = df['net_pnl'].sum()
-    win_rate = (len(df[df['net_pnl'] > 0]) / len(df) * 100) if not df.empty else 0
-    total_comm = df['commission'].sum() if 'commission' in df.columns else 0
 
-    m1.metric("Realized P&L", f"${total_pnl:,.2f}", delta=None)
+    total_pnl = filtered_df['net_pnl'].sum()
+    win_count = len(filtered_df[filtered_df['net_pnl'] > 0])
+    total_trades = len(filtered_df)
+    win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+    total_comm = filtered_df['commission'].sum() if 'commission' in filtered_df.columns else 0
+
+    m1.metric("Net P&L", f"${total_pnl:,.2f}", delta=None)
     m2.metric("Win Rate", f"{win_rate:.1f}%")
-    m3.metric("Closed Trades", len(df))
+    m3.metric("Trades Executed", total_trades)
     m4.metric("Commissions", f"${total_comm:,.2f}")
 
-    # 4. Main Visuals (Tabs)
-    tab_equity, tab_symbols, tab_raw = st.tabs(["Equity Curve", "Symbol Breakdown", "Trade Journal"])
+    # --- VISUALIZATION TABS ---
+    tab_equity, tab_symbols, tab_raw = st.tabs(["Equity Curve", "P&L by Ticker", "Trade Journal"])
 
     with tab_equity:
-        st.subheader("Cumulative P&L Over Time")
-        df_sorted = df.sort_values('close_date')
-        df_sorted['cum_pnl'] = df_sorted['net_pnl'].cumsum()
+        if not filtered_df.empty:
+            df_sorted = filtered_df.sort_values('close_date')
+            df_sorted['cum_pnl'] = df_sorted['net_pnl'].cumsum()
 
-        fig = px.line(df_sorted, x='close_date', y='cum_pnl',
-                      labels={'cum_pnl': 'Cumulative P&L ($)', 'close_date': 'Date'},
-                      template="plotly_dark")
-        st.plotly_chart(fig, use_container_width=True)
+            fig = px.line(df_sorted, x='close_date', y='cum_pnl',
+                          title="Cumulative P&L",
+                          labels={'cum_pnl': 'Net P&L ($)', 'close_date': 'Date'},
+                          template="plotly_dark")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No trades in this period.")
 
     with tab_symbols:
-        st.subheader("Net P&L by Symbol")
-        sym_pnl = df.groupby('symbol')['net_pnl'].sum().sort_values()
+        if not filtered_df.empty:
+            # Group by ROOT symbol to combine Stock + Options P&L
+            sym_pnl = filtered_df.groupby('root_symbol')['net_pnl'].sum().sort_values()
 
-        fig_bar = px.bar(sym_pnl, orientation='h',
-                         color=sym_pnl > 0,
-                         color_discrete_map={True: 'green', False: 'red'},
-                         labels={'value': 'Net P&L ($)', 'symbol': 'Ticker'})
-        st.plotly_chart(fig_bar, use_container_width=True)
+            # Color logic: Green for profit, Red for loss
+            colors = ['green' if v > 0 else 'red' for v in sym_pnl.values]
+
+            fig_bar = px.bar(sym_pnl, orientation='h',
+                             title="Net P&L by Ticker (Stock + Options)",
+                             color=sym_pnl.values,
+                             color_continuous_scale=['red', 'green'],
+                             labels={'value': 'Net P&L ($)', 'root_symbol': 'Ticker'})
+            st.plotly_chart(fig_bar, use_container_width=True)
 
     with tab_raw:
-        st.subheader("Trade Execution Log")
-        st.dataframe(df.sort_values('close_date', ascending=False), use_container_width=True)
+        st.subheader("Detailed Trade Log")
+        # Reorder columns for readability
+        display_cols = ['close_date', 'root_symbol', 'asset_id', 'quantity', 'net_pnl', 'commission']
+        st.dataframe(filtered_df[display_cols].sort_values('close_date', ascending=False),
+                     use_container_width=True)
 
-    # 5. Open Positions Summary
+    # --- OPEN POSITIONS SECTION ---
     st.divider()
     st.subheader("📋 Current Open Positions")
+
     if not open_df.empty:
-        st.table(open_df)
+        # Apply symbol filter to open positions too if selected
+        open_view = open_df.copy()
+        if selected_roots:
+            open_view = open_view[open_view['root_symbol'].isin(selected_roots)]
+
+        st.dataframe(open_view.sort_values('root_symbol'), use_container_width=True)
     else:
-        st.info("No open positions detected.")
+        st.info("No open positions.")
