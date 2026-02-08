@@ -14,7 +14,7 @@ data_service = DataService()
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("Controls")
 
-# Date Presets
+# 1. Date Presets
 st.sidebar.subheader("Time Period")
 time_period = st.sidebar.selectbox(
     "Select Period",
@@ -43,6 +43,12 @@ if time_period == "Custom":
     if len(date_range) == 2:
         start_date, end_date = date_range
 
+# 2. Chart Settings (New)
+st.sidebar.divider()
+st.sidebar.subheader("Chart Settings")
+chart_resolution = st.sidebar.selectbox("Resolution", ["Daily", "Weekly", "Monthly"], index=0)
+chart_view = st.sidebar.radio("View Type", ["Cumulative P&L", "Period P&L"])
+
 # --- LOAD DATA ---
 closed_df, open_df = data_service.get_processed_data()
 
@@ -65,11 +71,11 @@ else:
     # --- TOP METRICS ---
     st.markdown(f"### Performance ({time_period})")
 
-    # Calculate Metrics
     total_pnl = filtered_df['net_pnl'].sum()
 
     # Separate Dividends for specific metric
-    div_df = filtered_df[filtered_df['close_reason'].isin(['Dividends', 'PaymentInLieuOfDividends', 'WithholdingTax'])]
+    div_types = ['Dividends', 'PaymentInLieuOfDividends', 'WithholdingTax']
+    div_df = filtered_df[filtered_df['close_reason'].isin(div_types)]
     total_divs = div_df['net_pnl'].sum()
 
     # Trading P&L (Excluding Divs)
@@ -79,7 +85,6 @@ else:
     win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
     total_comm = filtered_df['commission'].sum() if 'commission' in filtered_df.columns else 0
 
-    # Display 5 Columns
     m1, m2, m3, m4, m5 = st.columns(5)
 
     m1.metric("Net P&L", f"${total_pnl:,.2f}", help="Total P&L including Dividends")
@@ -93,13 +98,46 @@ else:
 
     with tab_equity:
         if not filtered_df.empty:
-            df_sorted = filtered_df.sort_values('close_date')
-            df_sorted['cum_pnl'] = df_sorted['net_pnl'].cumsum()
+            # 1. Prepare Data for Resampling
+            df_chart = filtered_df.copy()
+            df_chart = df_chart.set_index('close_date')
 
-            fig = px.line(df_sorted, x='close_date', y='cum_pnl',
-                          title="Cumulative P&L (Total)",
-                          labels={'cum_pnl': 'Net P&L ($)', 'close_date': 'Date'},
-                          template="plotly_dark")
+            # 2. Map Resolution to Pandas Offset Aliases
+            # 'D' = Day, 'W-FRI' = Weekly ending Friday, 'MS' = Month Start (fixes off-by-one month label)
+            rule_map = {"Daily": "D", "Weekly": "W-FRI", "Monthly": "MS"}
+            rule = rule_map.get(chart_resolution, "D")
+
+            # 3. Resample (Aggregate P&L per bucket)
+            # We use sum() to get the total P&L for that Day/Week/Month
+            df_resampled = df_chart['net_pnl'].resample(rule).sum().fillna(0)
+
+            # 4. Handle View Type
+            if chart_view == "Cumulative P&L":
+                # Cumulative Sum over time
+                df_final = df_resampled.cumsum()
+
+                # Plot Line Chart
+                fig = px.line(df_final, x=df_final.index, y='net_pnl',
+                              title=f"Cumulative P&L ({chart_resolution})",
+                              labels={'net_pnl': 'Cumulative P&L ($)', 'close_date': 'Date'},
+                              template="plotly_dark")
+
+                # Add area fill for better visuals
+                fig.update_traces(fill='tozeroy')
+
+            else:  # Period P&L
+                # Just the raw bucketed sums
+                df_final = df_resampled
+
+                # Plot Bar Chart (Red/Green logic)
+                colors = ['green' if v >= 0 else 'red' for v in df_final.values]
+
+                fig = px.bar(df_final, x=df_final.index, y='net_pnl',
+                             title=f"Net P&L by {chart_resolution} Period",
+                             labels={'net_pnl': 'Net P&L ($)', 'close_date': 'Date'},
+                             template="plotly_dark")
+                fig.update_traces(marker_color=colors)
+
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No trades in this period.")
