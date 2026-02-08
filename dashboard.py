@@ -14,7 +14,7 @@ data_service = DataService()
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("Controls")
 
-# 1. Date Presets
+# Date Presets
 st.sidebar.subheader("Time Period")
 time_period = st.sidebar.selectbox(
     "Select Period",
@@ -34,12 +34,10 @@ elif time_period == "Last Year":
 elif time_period == "MTD":
     start_date = date(today.year, today.month, 1)
 elif time_period == "WTD":
-    # Monday of current week
     start_date = today - timedelta(days=today.weekday())
 elif time_period == "Since Inception":
-    start_date = None  # Will be set to min_date of data
+    start_date = None
 
-# Custom Date Picker
 if time_period == "Custom":
     date_range = st.sidebar.date_input("Custom Range", [today - timedelta(days=30), today])
     if len(date_range) == 2:
@@ -51,16 +49,13 @@ closed_df, open_df = data_service.get_processed_data()
 if closed_df.empty:
     st.warning("No trading data found. Please run main.py to fetch data.")
 else:
-    # Handle 'Since Inception' if selected
     if start_date is None:
         start_date = closed_df['close_date'].min().date()
 
-    # 2. Filter Logic
     mask = (closed_df['close_date'].dt.date >= start_date) & (closed_df['close_date'].dt.date <= end_date)
     filtered_df = closed_df.loc[mask].copy()
 
-    # 3. Symbol Filter (Using ROOT SYMBOL)
-    # Extract unique root symbols for the dropdown
+    # Symbol Filter
     all_roots = sorted(filtered_df['root_symbol'].astype(str).unique())
     selected_roots = st.sidebar.multiselect("Filter by Ticker", all_roots)
 
@@ -100,12 +95,7 @@ else:
 
     with tab_symbols:
         if not filtered_df.empty:
-            # Group by ROOT symbol to combine Stock + Options P&L
             sym_pnl = filtered_df.groupby('root_symbol')['net_pnl'].sum().sort_values()
-
-            # Color logic: Green for profit, Red for loss
-            colors = ['green' if v > 0 else 'red' for v in sym_pnl.values]
-
             fig_bar = px.bar(sym_pnl, orientation='h',
                              title="Net P&L by Ticker (Stock + Options)",
                              color=sym_pnl.values,
@@ -115,21 +105,33 @@ else:
 
     with tab_raw:
         st.subheader("Detailed Trade Log")
-        # Reorder columns for readability
-        display_cols = ['close_date', 'root_symbol', 'asset_id', 'quantity', 'net_pnl', 'commission']
-        st.dataframe(filtered_df[display_cols].sort_values('close_date', ascending=False),
-                     use_container_width=True)
+        # --- NEW COLUMN ORDER ---
+        display_cols = [
+            'root_symbol',
+            'asset_id',
+            'quantity',
+            'entry_date',  # Added
+            'close_date',
+            'commission',
+            'net_pnl',
+            'close_reason'  # Added
+        ]
+        # Filter existing columns to prevent errors if data is empty or missing cols
+        valid_cols = [c for c in display_cols if c in filtered_df.columns]
+
+        st.dataframe(
+            filtered_df[valid_cols].sort_values('close_date', ascending=False),
+            use_container_width=True
+        )
 
     # --- OPEN POSITIONS SECTION ---
     st.divider()
     st.subheader("📋 Current Open Positions")
 
     if not open_df.empty:
-        # Apply symbol filter to open positions too if selected
         open_view = open_df.copy()
         if selected_roots:
             open_view = open_view[open_view['root_symbol'].isin(selected_roots)]
-
         st.dataframe(open_view.sort_values('root_symbol'), use_container_width=True)
     else:
         st.info("No open positions.")
