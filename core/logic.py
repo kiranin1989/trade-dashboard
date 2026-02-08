@@ -22,7 +22,10 @@ class PnLEngine:
         return root
 
     @staticmethod
-    def calculate_fifo_pnl(trades_df: pd.DataFrame):
+    def calculate_fifo_pnl(trades_df: pd.DataFrame, cash_df: pd.DataFrame = None):
+        """
+        Process executions AND cash transactions to calculate Total Realized P&L.
+        """
         if trades_df.empty:
             return pd.DataFrame(), pd.DataFrame()
 
@@ -30,6 +33,7 @@ class PnLEngine:
         closed_trades = []
         portfolio = {}
 
+        # --- PART 1: PROCESS TRADES (FIFO) ---
         for _, row in trades_df.iterrows():
             asset_key = PnLEngine._generate_asset_key(row)
             root_symbol = row.get('underlying') if row.get('underlying') else row.get('symbol')
@@ -48,89 +52,91 @@ class PnLEngine:
                 portfolio[asset_key] = deque()
             inventory = portfolio[asset_key]
 
-            # --- FIFO MATCHING LOGIC ---
-
-            # CASE 1: Open/Add Position
+            # Match FIFO
             if not inventory or (inventory[0]['qty'] > 0 and qty > 0) or (inventory[0]['qty'] < 0 and qty < 0):
                 inventory.append({
-                    'qty': qty,
-                    'price': price,
-                    'date': row['trade_date'],
-                    'mult': multiplier,
-                    'comm_per_unit': current_comm_per_unit
+                    'qty': qty, 'price': price, 'date': row['trade_date'],
+                    'mult': multiplier, 'comm_per_unit': current_comm_per_unit
                 })
-
-            # CASE 2: Close Position
             else:
                 remaining_qty = qty
                 while remaining_qty != 0 and inventory:
                     lot = inventory[0]
 
-                    # Determine Close Reason (Basic Heuristic)
+                    # Close Reason
                     close_reason = "Trade"
-                    # If it's an option closing at 0 price, it expired
                     if ('OPT' in str(row.get('asset_class', ''))) and price == 0.0:
                         close_reason = "Expired"
 
                     if abs(remaining_qty) >= abs(lot['qty']):
-                        # FULL MATCH
                         matched_q = lot['qty']
                         inventory.popleft()
                         remaining_qty -= (-matched_q)
 
                         direction = 1 if matched_q > 0 else -1
                         gross_pnl = (price - lot['price']) * abs(matched_q) * lot['mult'] * direction
-
-                        entry_comm = abs(matched_q) * lot['comm_per_unit']
-                        exit_comm = abs(matched_q) * current_comm_per_unit
-                        total_comm = entry_comm + exit_comm
-                        net_pnl = gross_pnl + total_comm
+                        total_comm = (abs(matched_q) * lot['comm_per_unit']) + (abs(matched_q) * current_comm_per_unit)
+                        net_pnl = gross_pnl + total_comm  # total_comm is negative
 
                         closed_trades.append({
                             'root_symbol': root_symbol,
                             'asset_id': asset_key,
                             'quantity': abs(matched_q),
-                            'entry_date': lot['date'],  # <--- NEW
+                            'entry_date': lot['date'],
                             'close_date': row['trade_date'],
                             'commission': total_comm,
                             'net_pnl': net_pnl,
-                            'close_reason': close_reason  # <--- NEW
+                            'close_reason': close_reason
                         })
                     else:
-                        # PARTIAL MATCH
                         matched_q = -remaining_qty
                         lot['qty'] -= matched_q
 
                         direction = 1 if matched_q > 0 else -1
                         gross_pnl = (price - lot['price']) * abs(matched_q) * lot['mult'] * direction
-
-                        entry_comm = abs(matched_q) * lot['comm_per_unit']
-                        exit_comm = abs(matched_q) * current_comm_per_unit
-                        total_comm = entry_comm + exit_comm
+                        total_comm = (abs(matched_q) * lot['comm_per_unit']) + (abs(matched_q) * current_comm_per_unit)
                         net_pnl = gross_pnl + total_comm
 
                         closed_trades.append({
                             'root_symbol': root_symbol,
                             'asset_id': asset_key,
                             'quantity': abs(matched_q),
-                            'entry_date': lot['date'],  # <--- NEW
+                            'entry_date': lot['date'],
                             'close_date': row['trade_date'],
                             'commission': total_comm,
                             'net_pnl': net_pnl,
-                            'close_reason': close_reason  # <--- NEW
+                            'close_reason': close_reason
                         })
                         remaining_qty = 0
-
                 if remaining_qty != 0:
                     inventory.append({
-                        'qty': remaining_qty,
-                        'price': price,
-                        'date': row['trade_date'],
-                        'mult': multiplier,
-                        'comm_per_unit': current_comm_per_unit
+                        'qty': remaining_qty, 'price': price, 'date': row['trade_date'],
+                        'mult': multiplier, 'comm_per_unit': current_comm_per_unit
                     })
 
-        # Open Positions Calculation (unchanged)
+        # --- PART 2: PROCESS DIVIDENDS ---
+        if cash_df is not None and not cash_df.empty:
+            # Filter for relevant types (Dividends, Taxes, Payment in Lieu)
+            # IBKR Types: 'Dividends', 'PaymentInLieuOfDividends', 'WithholdingTax'
+            div_types = ['Dividends', 'PaymentInLieuOfDividends', 'WithholdingTax']
+
+            # Use 'isin' to filter. Note: IBKR XML might use slightly different casing,
+            # so we might want to check strict strings if this misses data.
+            divs = cash_df[cash_df['type'].isin(div_types)]
+
+            for _, row in divs.iterrows():
+                closed_trades.append({
+                    'root_symbol': row['symbol'],
+                    'asset_id': 'DIVIDEND',
+                    'quantity': 0,
+                    'entry_date': row['date'],
+                    'close_date': row['date'],
+                    'commission': 0.0,
+                    'net_pnl': float(row['amount']),  # Dividends are positive, Tax is negative
+                    'close_reason': row['type']  # e.g. "Dividends"
+                })
+
+        # --- PART 3: CALCULATE OPEN POSITIONS ---
         open_pos_list = []
         for asset_id, lots in portfolio.items():
             total_qty = sum(l['qty'] for l in lots)

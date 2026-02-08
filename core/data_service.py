@@ -17,18 +17,21 @@ class DataService:
     def get_processed_data(self):
         conn = self.db.get_connection()
         try:
-            # Load raw executions
+            # 1. Load raw executions
             raw_trades_df = conn.execute("""
                 SELECT * FROM trades 
                 WHERE asset_class NOT IN ('CASH')
                 AND symbol NOT LIKE '%.%'
             """).df()
 
+            # 2. Load cash transactions (Dividends, Tax, etc.)
+            raw_cash_df = conn.execute("SELECT * FROM transactions").df()
+
             if raw_trades_df.empty:
                 return pd.DataFrame(), pd.DataFrame()
 
-            # Run Logic Engine
-            closed_df, open_df = PnLEngine.calculate_fifo_pnl(raw_trades_df)
+            # 3. Run Logic Engine (Now passing cash_df)
+            closed_df, open_df = PnLEngine.calculate_fifo_pnl(raw_trades_df, raw_cash_df)
 
             # Ensure date formats are proper for UI
             if not closed_df.empty:
@@ -49,7 +52,6 @@ class DataService:
             return df
         filtered_df = df.copy()
 
-        # NOTE: Using 'root_symbol' for filtering now
         if symbols:
             filtered_df = filtered_df[filtered_df['root_symbol'].isin(symbols)]
 
