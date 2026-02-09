@@ -14,6 +14,21 @@ data_service = DataService()
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("Controls")
 
+# 0. Sync Status (NEW)
+last_sync = data_service.get_last_sync()
+st.sidebar.caption(f"Last Updated: {last_sync}")
+
+if st.sidebar.button("🔄 Sync with IBKR"):
+    with st.spinner("Connecting to IBKR... This may take up to 30s."):
+        success, msg = data_service.sync_ibkr_data()
+        if success:
+            st.sidebar.success(msg)
+            st.rerun()  # Refresh the page to show new data
+        else:
+            st.sidebar.error(msg)
+
+st.sidebar.divider()
+
 # Date Presets
 st.sidebar.subheader("Time Period")
 time_period = st.sidebar.selectbox("Select Period", ["YTD", "Last Year", "MTD", "WTD", "Since Inception", "Custom"])
@@ -44,10 +59,9 @@ st.sidebar.subheader("Chart Settings")
 chart_resolution = st.sidebar.selectbox("Resolution", ["Daily", "Weekly", "Monthly"], index=0)
 chart_view = st.sidebar.radio("View Type", ["Cumulative P&L", "Period P&L"])
 
-# --- BENCHMARK SETTINGS (UPDATED) ---
+# --- BENCHMARK SETTINGS ---
 show_benchmark = st.sidebar.checkbox("Show S&P 500 Benchmark", value=False)
 if show_benchmark:
-    # We need a capital base to convert % return to $ return
     benchmark_capital = st.sidebar.number_input("Benchmark Principal ($)", value=50000, step=1000,
                                                 help="Simulate investing this amount into SPY to compare dollar returns.")
 
@@ -55,7 +69,7 @@ if show_benchmark:
 closed_df, open_df = data_service.get_processed_data()
 
 if closed_df.empty:
-    st.warning("No trading data found. Please run main.py to fetch data.")
+    st.warning("No trading data found. Click 'Sync with IBKR' in the sidebar.")
 else:
     if start_date is None:
         start_date = closed_df['close_date'].min().date()

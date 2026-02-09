@@ -3,10 +3,12 @@ import yfinance as yf
 from datetime import datetime, timedelta
 from core.database import DatabaseManager
 from core.logic import PnLEngine
+from core.ibkr_client import IBKRFlexClient  # NEW IMPORTS
+from core.parser import parse_ibkr_xml  # NEW IMPORTS
+from config import settings  # NEW IMPORTS
 import logging
 import sys
 
-# Configure logging to ensure output appears in Streamlit console
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,6 +20,53 @@ logger = logging.getLogger(__name__)
 class DataService:
     def __init__(self):
         self.db = DatabaseManager()
+
+    def sync_ibkr_data(self):
+        """
+        Connects to IBKR, downloads the report, and saves to DB.
+        Returns (success: bool, message: str)
+        """
+        logger.info("Starting manual IBKR Sync...")
+        try:
+            client = IBKRFlexClient(token=settings.IBKR_TOKEN, query_id=settings.IBKR_QUERY_ID)
+
+            # 1. Request
+            result = client.request_report()
+            if not result:
+                return False, "Failed to initiate report request."
+
+            ref_code, url = result
+
+            # 2. Download
+            xml_content = client.download_report(ref_code, url)
+            if not xml_content:
+                return False, "Download failed (empty content)."
+
+            # 3. Parse
+            data_map = parse_ibkr_xml(xml_content)
+            trades_df = data_map.get('trades')
+            cash_df = data_map.get('transactions')
+
+            # 4. Save
+            count_t = len(trades_df)
+            count_c = len(cash_df)
+
+            if not trades_df.empty:
+                self.db.save_dataframe('trades', trades_df)
+            if not cash_df.empty:
+                self.db.save_dataframe('transactions', cash_df)
+
+            # 5. Record Time
+            self.db.record_sync_time()
+
+            return True, f"Synced {count_t} trades & {count_c} transactions."
+
+        except Exception as e:
+            logger.error(f"Sync Error: {e}")
+            return False, str(e)
+
+    def get_last_sync(self):
+        return self.db.get_last_sync_time()
 
     def get_processed_data(self):
         conn = self.db.get_connection()
@@ -39,20 +88,14 @@ class DataService:
             self.db.close()
 
     def get_benchmark_data(self, symbol="^GSPC", start_date=None):
-        """
-        Fetches benchmark data. Handles yfinance MultiIndex column issues.
-        """
         conn = self.db.get_connection()
         try:
-            # 1. Check DB for last date
             try:
-                # Ensure table exists (in case DB wasn't updated)
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS market_data (symbol VARCHAR, date TIMESTAMP, close DOUBLE, PRIMARY KEY (symbol, date))")
                 res = conn.execute("SELECT MAX(date) FROM market_data WHERE symbol = ?", [symbol]).fetchone()
                 last_db_date = res[0] if res and res[0] else None
-            except Exception as e:
-                logger.error(f"DB Check failed: {e}")
+            except Exception:
                 last_db_date = None
 
             today = datetime.now().date()
@@ -63,58 +106,22 @@ class DataService:
             elif last_db_date.date() < today:
                 fetch_start = last_db_date.date() + timedelta(days=1)
 
-            # 2. Update from Web if needed
             if fetch_start and fetch_start <= today:
-                msg = f"Updating benchmark {symbol} from {fetch_start}..."
-                logger.info(msg)
-                print(f"DEBUG: {msg}")  # Direct print to force visibility in Streamlit console
-
                 try:
                     df_yf = yf.download(symbol, start=fetch_start, progress=False)
-
-                    if df_yf.empty:
-                        logger.warning(
-                            f"YFinance download returned empty dataframe for {symbol}. Check internet connection or symbol.")
-                        print(f"DEBUG: YFinance download empty for {symbol}")
-                    else:
-                        # --- CRITICAL FIX: Flatten MultiIndex Columns ---
-                        # yfinance often returns columns like ('Close', '^GSPC')
+                    if not df_yf.empty:
                         if isinstance(df_yf.columns, pd.MultiIndex):
                             df_yf.columns = df_yf.columns.get_level_values(0)
-                        # -----------------------------------------------
-
-                        # Reset index to make Date a column
                         df_to_save = df_yf.reset_index()
-
-                        # Normalize columns to lowercase for safer matching
                         df_to_save.columns = [c.lower() for c in df_to_save.columns]
-
-                        logger.info(f"Downloaded columns: {df_to_save.columns.tolist()}")
-
-                        # Ensure we have the columns we expect
                         if 'date' in df_to_save.columns and 'close' in df_to_save.columns:
-                            # CRITICAL FIX: Reorder columns to match DB Schema (symbol, date, close)
-                            # DuckDB inserts by position, not name.
                             df_to_save['symbol'] = symbol
-
-                            # Clean Date format
                             df_to_save['date'] = pd.to_datetime(df_to_save['date']).dt.tz_localize(None)
-
-                            # Select and Order columns explicitly: symbol(1), date(2), close(3)
                             df_to_save = df_to_save[['symbol', 'date', 'close']]
-
                             self.db.save_dataframe('market_data', df_to_save)
-                            logger.info(f"Saved {len(df_to_save)} rows to market_data.")
-                        else:
-                            logger.error(f"YFinance returned unexpected columns: {df_to_save.columns}")
-                            print(f"DEBUG: Unexpected columns {df_to_save.columns}")
-
                 except Exception as e:
                     logger.error(f"Web fetch failed: {e}")
-                    import traceback
-                    traceback.print_exc()
 
-            # 3. Return Data
             query = "SELECT date, close FROM market_data WHERE symbol = ? ORDER BY date"
             params = [symbol]
             if start_date:
@@ -125,11 +132,8 @@ class DataService:
             if not df_db.empty:
                 df_db['date'] = pd.to_datetime(df_db['date'])
                 df_db = df_db.set_index('date')
-
             return df_db
-
-        except Exception as e:
-            logger.error(f"Benchmark error: {e}")
+        except Exception:
             return pd.DataFrame()
         finally:
             self.db.close()
