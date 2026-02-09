@@ -3,7 +3,6 @@ import pandas as pd
 import logging
 from config import settings
 from pathlib import Path
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +20,7 @@ class DatabaseManager:
 
     def _initialize_tables(self):
         conn = self.conn
+        # Trades Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 trade_id VARCHAR PRIMARY KEY,
@@ -41,9 +41,11 @@ class DatabaseManager:
                 strike DOUBLE,
                 expiry VARCHAR,
                 put_call VARCHAR,
-                multiplier DOUBLE
+                multiplier DOUBLE,
+                code VARCHAR  -- <--- NEW: Stores IBKR Codes (A, Ex, Ep, etc.)
             )
         """)
+        # Transactions Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id VARCHAR PRIMARY KEY,
@@ -56,6 +58,7 @@ class DatabaseManager:
                 currency VARCHAR
             )
         """)
+        # Market Data Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS market_data (
                 symbol VARCHAR,
@@ -64,7 +67,7 @@ class DatabaseManager:
                 PRIMARY KEY (symbol, date)
             )
         """)
-        # --- NEW: Metadata Table ---
+        # Metadata Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS app_metadata (
                 key VARCHAR PRIMARY KEY,
@@ -89,14 +92,14 @@ class DatabaseManager:
             conn.unregister('df_view')
 
     def record_sync_time(self):
-        """Updates the last_sync timestamp."""
         conn = self.get_connection()
+        from datetime import datetime
         now_str = datetime.now().isoformat()
         conn.execute("INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('last_sync', ?)", [now_str])
 
     def get_last_sync_time(self):
-        """Returns the last sync timestamp as a formatted string."""
         conn = self.get_connection()
+        from datetime import datetime
         try:
             res = conn.execute("SELECT value FROM app_metadata WHERE key = 'last_sync'").fetchone()
             if res:

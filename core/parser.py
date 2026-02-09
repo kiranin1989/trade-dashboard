@@ -4,20 +4,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 def parse_ibkr_xml(xml_content: str) -> dict:
     try:
         root = ET.fromstring(xml_content)
         trades_data = []
-        
+
         for trade in root.findall(".//Trade"):
             strike = trade.get('strike')
             strike_val = float(strike) if strike else None
-            
-            # Extract Multiplier (Default to 1.0 for Stocks)
+
             raw_mult = trade.get('multiplier')
             multiplier = float(raw_mult) if raw_mult else 1.0
-            
-            # ORDER MUST MATCH DATABASE.PY EXACTLY
+
             trades_data.append({
                 'trade_id': trade.get('tradeID'),
                 'symbol': trade.get('symbol'),
@@ -29,7 +28,7 @@ def parse_ibkr_xml(xml_content: str) -> dict:
                 'commission': float(trade.get('ibCommission') or 0),
                 'realized_pnl': 0.0,
                 'currency': 'USD',
-                'flex_query_run_id': '', 
+                'flex_query_run_id': '',
                 'buy_sell': trade.get('buySell'),
                 'open_close': trade.get('openCloseIndicator'),
                 'close_price': float(trade.get('closePrice') or 0),
@@ -37,9 +36,10 @@ def parse_ibkr_xml(xml_content: str) -> dict:
                 'strike': strike_val,
                 'expiry': trade.get('expiry'),
                 'put_call': trade.get('putCall'),
-                'multiplier': multiplier # <--- Mapped to new column
+                'multiplier': multiplier,
+                'code': trade.get('notes', '')  # <--- FIXED: Map 'notes' XML attr to 'code' column
             })
-        
+
         cash_data = []
         for ct in root.findall(".//CashTransaction"):
             cash_data.append({
@@ -50,7 +50,7 @@ def parse_ibkr_xml(xml_content: str) -> dict:
                 'amount': float(ct.get('amount') or 0),
                 'date': ct.get('dateTime'),
                 'description': ct.get('description'),
-                'currency': 'USD' 
+                'currency': 'USD'
             })
 
         return {

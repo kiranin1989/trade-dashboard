@@ -6,26 +6,16 @@ logger = logging.getLogger(__name__)
 
 
 class PnLEngine:
-    """
-    Core Financial Logic.
-    Calculates Realized P&L using FIFO (First-In-First-Out) methodology.
-    """
-
     @staticmethod
     def _generate_asset_key(row):
         asset_class = str(row.get('asset_class', ''))
-        # Use underlying if available, else symbol
         root = row.get('underlying') if row.get('underlying') else row.get('symbol')
-
         if 'OPT' in asset_class or 'FOP' in asset_class:
             return f"{root} {row.get('expiry')} {row.get('strike')} {row.get('put_call')}"
         return root
 
     @staticmethod
     def calculate_fifo_pnl(trades_df: pd.DataFrame, cash_df: pd.DataFrame = None):
-        """
-        Process executions AND cash transactions to calculate Total Realized P&L.
-        """
         if trades_df.empty:
             return pd.DataFrame(), pd.DataFrame()
 
@@ -42,6 +32,9 @@ class PnLEngine:
             price = float(row['price'])
             comm = float(row['commission'])
             multiplier = float(row['multiplier']) if row.get('multiplier') and pd.notna(row['multiplier']) else 1.0
+
+            # Extract Code for Logic
+            code = str(row.get('code', ''))
 
             if str(row['buy_sell']).upper() in ['SELL', 'SLD'] and qty > 0:
                 qty = -qty
@@ -63,10 +56,21 @@ class PnLEngine:
                 while remaining_qty != 0 and inventory:
                     lot = inventory[0]
 
-                    # Close Reason
-                    close_reason = "Trade"
-                    if ('OPT' in str(row.get('asset_class', ''))) and price == 0.0:
+                    # --- DETERMINE CLOSE REASON ---
+                    # 1. Check IBKR Codes first
+                    if 'A' in code:
+                        close_reason = "Assigned"
+                    elif 'Ex' in code:
+                        close_reason = "Exercised"
+                    elif 'Ep' in code:
                         close_reason = "Expired"
+                    else:
+                        # 2. Heuristics if codes missing or standard trade
+                        if ('OPT' in str(row.get('asset_class', ''))) and price == 0.0:
+                            close_reason = "Expired"
+                        else:
+                            close_reason = "Trade"
+                    # ------------------------------
 
                     if abs(remaining_qty) >= abs(lot['qty']):
                         matched_q = lot['qty']
@@ -76,7 +80,7 @@ class PnLEngine:
                         direction = 1 if matched_q > 0 else -1
                         gross_pnl = (price - lot['price']) * abs(matched_q) * lot['mult'] * direction
                         total_comm = (abs(matched_q) * lot['comm_per_unit']) + (abs(matched_q) * current_comm_per_unit)
-                        net_pnl = gross_pnl + total_comm  # total_comm is negative
+                        net_pnl = gross_pnl + total_comm
 
                         closed_trades.append({
                             'root_symbol': root_symbol,
@@ -116,12 +120,7 @@ class PnLEngine:
 
         # --- PART 2: PROCESS DIVIDENDS ---
         if cash_df is not None and not cash_df.empty:
-            # Filter for relevant types (Dividends, Taxes, Payment in Lieu)
-            # IBKR Types: 'Dividends', 'PaymentInLieuOfDividends', 'WithholdingTax'
             div_types = ['Dividends', 'PaymentInLieuOfDividends', 'WithholdingTax']
-
-            # Use 'isin' to filter. Note: IBKR XML might use slightly different casing,
-            # so we might want to check strict strings if this misses data.
             divs = cash_df[cash_df['type'].isin(div_types)]
 
             for _, row in divs.iterrows():
@@ -132,8 +131,8 @@ class PnLEngine:
                     'entry_date': row['date'],
                     'close_date': row['date'],
                     'commission': 0.0,
-                    'net_pnl': float(row['amount']),  # Dividends are positive, Tax is negative
-                    'close_reason': row['type']  # e.g. "Dividends"
+                    'net_pnl': float(row['amount']),
+                    'close_reason': row['type']
                 })
 
         # --- PART 3: CALCULATE OPEN POSITIONS ---
