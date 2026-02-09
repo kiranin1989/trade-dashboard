@@ -1,0 +1,20 @@
+services:
+  ibkr-dashboard:
+    container_name: ibkr-dashboard
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      # PERSISTENCE: Map local data folder to container data folder
+      # This ensures trading_data.duckdb survives container restarts
+      - ./data:/app/data
+    env_file:
+      # CONFIG: Load secrets from your local .env file
+      - .env
+    restart: unless-stopped
+    networks:
+      - trading-net
+
+networks:
+  trading-net:
+    driver: bridge

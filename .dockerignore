@@ -1,0 +1,20 @@
+Ignore git files
+
+.git/
+.gitignore
+
+Ignore Python cache and environment
+
+pycache/
+venv/
+.venv/
+*.pyc
+*.pyo
+*.pyd
+
+Ignore local secrets and data (these are mounted via volumes or env_file)
+
+.env
+data/
+.idea/
+.vscode/
