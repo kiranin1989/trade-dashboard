@@ -14,7 +14,7 @@ data_service = DataService()
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("Controls")
 
-# 0. Sync Status (NEW)
+# 0. Sync Status
 last_sync = data_service.get_last_sync()
 st.sidebar.caption(f"Last Updated: {last_sync}")
 
@@ -195,7 +195,7 @@ else:
                 legend=dict(orientation="h", y=1.1),
                 yaxis_title="Profit / Loss ($)"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         else:
             st.info("No trades in this period.")
 
@@ -205,20 +205,20 @@ else:
             fig_bar = px.bar(sym_pnl, orientation='h', title="Net P&L by Ticker", color=sym_pnl.values,
                              color_continuous_scale=['red', 'green'],
                              labels={'value': 'Net P&L ($)', 'root_symbol': 'Ticker'})
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_bar, width="stretch")
 
     with tab_raw:
         st.subheader("Detailed Trade Log")
         display_cols = ['root_symbol', 'asset_id', 'quantity', 'entry_date', 'close_date', 'commission', 'net_pnl',
                         'close_reason']
         valid_cols = [c for c in display_cols if c in filtered_df.columns]
-        st.dataframe(filtered_df[valid_cols].sort_values('close_date', ascending=False), use_container_width=True)
+        st.dataframe(filtered_df[valid_cols].sort_values('close_date', ascending=False), width="stretch")
 
     st.divider()
     st.subheader("📋 Current Open Positions")
     if not open_df.empty:
         open_view = open_df.copy()
         if selected_roots: open_view = open_view[open_view['root_symbol'].isin(selected_roots)]
-        st.dataframe(open_view.sort_values('root_symbol'), use_container_width=True)
+        st.dataframe(open_view.sort_values('root_symbol'), width="stretch")
     else:
         st.info("No open positions.")
