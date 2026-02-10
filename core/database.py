@@ -18,7 +18,8 @@ class DatabaseManager:
         self.use_motherduck = settings.MOTHERDUCK_TOKEN is not None and len(settings.MOTHERDUCK_TOKEN) > 0
 
         if self.use_motherduck:
-            # Connect to MotherDuck cloud database named 'ibkr_dashboard'
+            # Connect to MotherDuck
+            # We add the ?motherduck_token param, but we ALSO need to run 'USE' command later to be safe
             self.db_path = f"md:ibkr_dashboard?motherduck_token={settings.MOTHERDUCK_TOKEN}"
             logger.info("Configured for MotherDuck Cloud Database.")
         else:
@@ -32,6 +33,16 @@ class DatabaseManager:
     def get_connection(self):
         if self.conn is None:
             self.conn = duckdb.connect(self.db_path)
+
+            # --- CRITICAL FIX FOR DEPLOYMENT ---
+            if self.use_motherduck:
+                # Ensure we are looking at the migrated data, not the default empty DB
+                try:
+                    self.conn.execute("USE ibkr_dashboard")
+                except Exception as e:
+                    logger.warning(f"Could not switch context to ibkr_dashboard: {e}")
+            # -----------------------------------
+
             self._initialize_tables()
         return self.conn
 

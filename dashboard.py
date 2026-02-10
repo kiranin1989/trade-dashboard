@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from core.data_service import DataService
 from datetime import datetime, timedelta, date
+from config import settings
 
 # Page Config
 st.set_page_config(page_title="IBKR Trading Dashboard", layout="wide")
@@ -17,6 +18,11 @@ st.sidebar.header("Controls")
 # 0. Sync Status
 last_sync = data_service.get_last_sync()
 st.sidebar.caption(f"Last Updated: {last_sync}")
+
+# --- DEBUG INFO ---
+mode = "CLOUD (MotherDuck)" if settings.MOTHERDUCK_TOKEN else "LOCAL (File)"
+st.sidebar.caption(f"Mode: {mode}")
+# ------------------
 
 if st.sidebar.button("🔄 Sync with IBKR"):
     with st.spinner("Connecting to IBKR... This may take up to 30s."):
