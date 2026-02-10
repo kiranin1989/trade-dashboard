@@ -3,13 +3,30 @@ import pandas as pd
 import logging
 from config import settings
 from pathlib import Path
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+
 class DatabaseManager:
+    """
+    Handles interactions with the DuckDB database (Local or MotherDuck).
+    """
+
     def __init__(self):
-        self.db_path = settings.DATABASE_URL
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        # Check if MotherDuck token is present
+        self.use_motherduck = settings.MOTHERDUCK_TOKEN is not None and len(settings.MOTHERDUCK_TOKEN) > 0
+
+        if self.use_motherduck:
+            # Connect to MotherDuck cloud database named 'ibkr_dashboard'
+            self.db_path = f"md:ibkr_dashboard?motherduck_token={settings.MOTHERDUCK_TOKEN}"
+            logger.info("Configured for MotherDuck Cloud Database.")
+        else:
+            # Fallback to local file
+            self.db_path = settings.DATABASE_URL
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Configured for Local Database: {self.db_path}")
+
         self.conn = None
 
     def get_connection(self):
@@ -42,7 +59,7 @@ class DatabaseManager:
                 expiry VARCHAR,
                 put_call VARCHAR,
                 multiplier DOUBLE,
-                code VARCHAR  -- <--- NEW: Stores IBKR Codes (A, Ex, Ep, etc.)
+                code VARCHAR
             )
         """)
         # Transactions Table
@@ -93,13 +110,11 @@ class DatabaseManager:
 
     def record_sync_time(self):
         conn = self.get_connection()
-        from datetime import datetime
         now_str = datetime.now().isoformat()
         conn.execute("INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('last_sync', ?)", [now_str])
 
     def get_last_sync_time(self):
         conn = self.get_connection()
-        from datetime import datetime
         try:
             res = conn.execute("SELECT value FROM app_metadata WHERE key = 'last_sync'").fetchone()
             if res:
