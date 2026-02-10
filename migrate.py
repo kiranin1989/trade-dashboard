@@ -22,7 +22,6 @@ def migrate():
 
     try:
         # 1. Connect to MotherDuck (Default Context)
-        # We do NOT specify 'ibkr_dashboard' in the connection string yet
         print("Connecting to MotherDuck...")
         md_conn = duckdb.connect(f"md:?motherduck_token={MOTHERDUCK_TOKEN}")
 
@@ -38,16 +37,15 @@ def migrate():
         md_conn.execute(f"ATTACH '{LOCAL_DB_PATH}' AS local_db")
 
         # 5. Create Tables and Copy Data
-        # Note: We check if tables exist in local_db first to avoid errors
         tables = ['trades', 'transactions', 'market_data', 'app_metadata']
 
         for table in tables:
             print(f"Migrating table: {table}...")
             try:
-                # Check if table exists in local DB
-                table_exists = md_conn.execute(
-                    f"SELECT count(*) FROM information_schema.tables WHERE table_schema='local_db' AND table_name='{table}'"
-                ).fetchone()[0] > 0
+                # FIX: Check table_catalog='local_db', NOT table_schema
+                # When attaching a DB, the alias becomes the Catalog
+                query = f"SELECT count(*) FROM information_schema.tables WHERE table_catalog='local_db' AND table_name='{table}'"
+                table_exists = md_conn.execute(query).fetchone()[0] > 0
 
                 if not table_exists:
                     print(f" -> Skipping {table} (not found in local DB).")
