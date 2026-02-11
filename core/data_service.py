@@ -3,12 +3,15 @@ import yfinance as yf
 from datetime import datetime, timedelta
 from core.database import DatabaseManager
 from core.logic import PnLEngine
-from core.ibkr_client import IBKRFlexClient  # NEW IMPORTS
-from core.parser import parse_ibkr_xml  # NEW IMPORTS
-from config import settings  # NEW IMPORTS
+from core.strategy_engine import StrategyEngine  # NEW
+from core.campaign_engine import CampaignEngine  # NEW
+from core.ibkr_client import IBKRFlexClient
+from core.parser import parse_ibkr_xml
+from config import settings
 import logging
 import sys
 
+# Configure logging to ensure output appears in Streamlit console
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -24,30 +27,25 @@ class DataService:
     def sync_ibkr_data(self):
         """
         Connects to IBKR, downloads the report, and saves to DB.
-        Returns (success: bool, message: str)
         """
         logger.info("Starting manual IBKR Sync...")
         try:
             client = IBKRFlexClient(token=settings.IBKR_TOKEN, query_id=settings.IBKR_QUERY_ID)
 
-            # 1. Request
             result = client.request_report()
             if not result:
                 return False, "Failed to initiate report request."
 
             ref_code, url = result
 
-            # 2. Download
             xml_content = client.download_report(ref_code, url)
             if not xml_content:
                 return False, "Download failed (empty content)."
 
-            # 3. Parse
             data_map = parse_ibkr_xml(xml_content)
             trades_df = data_map.get('trades')
             cash_df = data_map.get('transactions')
 
-            # 4. Save
             count_t = len(trades_df)
             count_c = len(cash_df)
 
@@ -56,7 +54,6 @@ class DataService:
             if not cash_df.empty:
                 self.db.save_dataframe('transactions', cash_df)
 
-            # 5. Record Time
             self.db.record_sync_time()
 
             return True, f"Synced {count_t} trades & {count_c} transactions."
@@ -87,6 +84,21 @@ class DataService:
         finally:
             self.db.close()
 
+    # --- NEW ANALYTICS METHODS ---
+    def get_strategy_data(self, closed_df):
+        """Groups trades into Strategies (Verticals, Condors)."""
+        if closed_df.empty: return pd.DataFrame()
+        grouped = StrategyEngine.group_executions_into_strategies(closed_df)
+        return StrategyEngine.aggregate_strategy_pnl(grouped)
+
+    def get_campaign_data(self, closed_df):
+        """Groups trades into Wheel Campaigns."""
+        if closed_df.empty: return pd.DataFrame()
+        grouped = CampaignEngine.identify_campaigns(closed_df)
+        return CampaignEngine.aggregate_campaign_stats(grouped)
+
+    # -----------------------------
+
     def get_benchmark_data(self, symbol="^GSPC", start_date=None):
         conn = self.db.get_connection()
         try:
@@ -107,6 +119,8 @@ class DataService:
                 fetch_start = last_db_date.date() + timedelta(days=1)
 
             if fetch_start and fetch_start <= today:
+                msg = f"Updating benchmark {symbol} from {fetch_start}..."
+                logger.info(msg)
                 try:
                     df_yf = yf.download(symbol, start=fetch_start, progress=False)
                     if not df_yf.empty:

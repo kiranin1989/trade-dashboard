@@ -35,9 +35,13 @@ if st.sidebar.button("🔄 Sync with IBKR"):
 
 st.sidebar.divider()
 
-# Date Presets
-st.sidebar.subheader("Time Period")
-time_period = st.sidebar.selectbox("Select Period", ["YTD", "Last Year", "MTD", "WTD", "Since Inception", "Custom"])
+# 1. VIEW MODE
+view_mode = st.sidebar.radio("View Mode", ["Standard Dashboard", "Strategy Lab"], index=0)
+st.sidebar.divider()
+
+# 2. GLOBAL FILTERS
+st.sidebar.subheader("Global Filters")
+time_period = st.sidebar.selectbox("Time Period", ["YTD", "Last Year", "MTD", "WTD", "Since Inception", "Custom"])
 
 today = datetime.now().date()
 start_date = None
@@ -60,35 +64,43 @@ if time_period == "Custom":
     if len(date_range) == 2:
         start_date, end_date = date_range
 
-st.sidebar.divider()
-st.sidebar.subheader("Chart Settings")
-chart_resolution = st.sidebar.selectbox("Resolution", ["Daily", "Weekly", "Monthly"], index=0)
-chart_view = st.sidebar.radio("View Type", ["Cumulative P&L", "Period P&L"])
-
-# --- BENCHMARK SETTINGS ---
-show_benchmark = st.sidebar.checkbox("Show S&P 500 Benchmark", value=False)
-if show_benchmark:
-    benchmark_capital = st.sidebar.number_input("Benchmark Principal ($)", value=50000, step=1000,
-                                                help="Simulate investing this amount into SPY to compare dollar returns.")
-
-# --- LOAD DATA ---
+# --- LOAD RAW DATA ---
 closed_df, open_df = data_service.get_processed_data()
 
 if closed_df.empty:
     st.warning("No trading data found. Click 'Sync with IBKR' in the sidebar.")
-else:
-    if start_date is None:
-        start_date = closed_df['close_date'].min().date()
+    st.stop()
 
-    mask = (closed_df['close_date'].dt.date >= start_date) & (closed_df['close_date'].dt.date <= end_date)
-    filtered_df = closed_df.loc[mask].copy()
+# Helper for Global Filtering
+if start_date is None:
+    start_date = closed_df['close_date'].min().date()
 
-    all_roots = sorted(filtered_df['root_symbol'].astype(str).unique())
-    selected_roots = st.sidebar.multiselect("Filter by Ticker", all_roots)
-    if selected_roots:
-        filtered_df = filtered_df[filtered_df['root_symbol'].isin(selected_roots)]
+# Apply Filters to RAW data for Standard View
+# For Strategy view, we apply filters AFTER grouping to ensure full campaigns are captured
+mask = (closed_df['close_date'].dt.date >= start_date) & (closed_df['close_date'].dt.date <= end_date)
+filtered_df = closed_df.loc[mask].copy()
 
-    # --- BENCHMARK DATA FETCHING ---
+all_roots = sorted(closed_df['root_symbol'].astype(str).unique())
+selected_roots = st.sidebar.multiselect("Filter by Ticker", all_roots)
+
+if selected_roots:
+    filtered_df = filtered_df[filtered_df['root_symbol'].isin(selected_roots)]
+
+# ==============================================================================
+# VIEW 1: STANDARD DASHBOARD
+# ==============================================================================
+if view_mode == "Standard Dashboard":
+    st.sidebar.divider()
+    st.sidebar.subheader("Chart Settings")
+    chart_resolution = st.sidebar.selectbox("Resolution", ["Daily", "Weekly", "Monthly"], index=0)
+    chart_view = st.sidebar.radio("View Type", ["Cumulative P&L", "Period P&L"])
+
+    show_benchmark = st.sidebar.checkbox("Show S&P 500 Benchmark", value=False)
+    benchmark_capital = 50000
+    if show_benchmark:
+        benchmark_capital = st.sidebar.number_input("Benchmark Principal ($)", value=50000, step=1000)
+
+    # --- BENCHMARK DATA ---
     sp500_df = pd.DataFrame()
     if show_benchmark:
         try:
@@ -97,14 +109,10 @@ else:
             if not sp500_data.empty:
                 sp500_df = sp500_data.rename(columns={'close': 'Close'})
                 sp500_df = sp500_df[sp500_df.index.date <= end_date]
-            else:
-                st.sidebar.warning("Benchmark data empty.")
-        except Exception as e:
-            st.sidebar.error(f"Benchmark error: {e}")
+        except Exception:
+            pass
 
-    # --- TOP METRICS ---
-    st.markdown(f"### Performance ({time_period})")
-
+    # --- METRICS ---
     total_pnl = filtered_df['net_pnl'].sum()
     div_types = ['Dividends', 'PaymentInLieuOfDividends', 'WithholdingTax']
     div_df = filtered_df[filtered_df['close_reason'].isin(div_types)]
@@ -113,16 +121,14 @@ else:
     win_count = len(trade_only_df[trade_only_df['net_pnl'] > 0])
     total_trades = len(trade_only_df)
     win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
-    total_comm = filtered_df['commission'].sum() if 'commission' in filtered_df.columns else 0
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Net P&L", f"${total_pnl:,.2f}")
     m2.metric("Dividend Income", f"${total_divs:,.2f}")
-    m3.metric("Win Rate", f"{win_rate:.1f}%")
+    m3.metric("Trade Win Rate", f"{win_rate:.1f}%")
     m4.metric("Trades Executed", total_trades)
-    m5.metric("Commissions", f"${total_comm:,.2f}")
 
-    # --- VISUALIZATION TABS ---
+    # --- TABS ---
     tab_equity, tab_symbols, tab_raw = st.tabs(["Equity Curve", "P&L by Ticker", "Trade Journal"])
 
     with tab_equity:
@@ -132,10 +138,9 @@ else:
             rule_map = {"Daily": "D", "Weekly": "W-FRI", "Monthly": "MS"}
             rule = rule_map.get(chart_resolution, "D")
 
-            # User Data Resampling
             df_resampled = df_chart['net_pnl'].resample(rule).sum().fillna(0)
 
-            # Benchmark Resampling
+            # SP500
             sp_resampled_price = pd.Series(dtype=float)
             if not sp500_df.empty:
                 sp_resampled_price = sp500_df['Close'].resample(rule).last().dropna()
@@ -143,64 +148,31 @@ else:
                 common_end = min(df_resampled.index.max(), sp_resampled_price.index.max())
                 sp_resampled_price = sp_resampled_price.loc[common_start:common_end]
 
-            # SINGLE AXIS PLOT
             fig = go.Figure()
 
             if chart_view == "Cumulative P&L":
-                # User Cumulative ($)
                 user_series = df_resampled.cumsum()
-                fig.add_trace(go.Scatter(
-                    x=user_series.index,
-                    y=user_series.values,
-                    name="My P&L ($)",
-                    fill='tozeroy',
-                    line=dict(color='#00CC96')
-                ))
+                fig.add_trace(go.Scatter(x=user_series.index, y=user_series.values, name="My P&L ($)", fill='tozeroy',
+                                         line=dict(color='#00CC96')))
 
-                # Benchmark Cumulative ($)
                 if not sp_resampled_price.empty:
                     start_price = sp_resampled_price.iloc[0]
-                    # Calc % growth then multiply by simulated capital
                     sp_dollar_growth = ((sp_resampled_price / start_price) - 1) * benchmark_capital
-
-                    fig.add_trace(go.Scatter(
-                        x=sp_dollar_growth.index,
-                        y=sp_dollar_growth.values,
-                        name=f"S&P 500 (on ${benchmark_capital / 1000:,.0f}k)",
-                        line=dict(color='gray', dash='dot')
-                    ))
-
-            else:  # Period P&L
-                # User Period ($)
+                    fig.add_trace(
+                        go.Scatter(x=sp_dollar_growth.index, y=sp_dollar_growth.values, name=f"S&P 500 (Simulated)",
+                                   line=dict(color='gray', dash='dot')))
+            else:
                 user_series = df_resampled
                 colors = ['green' if v >= 0 else 'red' for v in user_series.values]
-                fig.add_trace(go.Bar(
-                    x=user_series.index,
-                    y=user_series.values,
-                    name="Period P&L ($)",
-                    marker_color=colors
-                ))
+                fig.add_trace(go.Bar(x=user_series.index, y=user_series.values, name="Period P&L", marker_color=colors))
 
-                # Benchmark Period ($)
                 if not sp_resampled_price.empty:
-                    # Calc period % change * simulated capital
                     sp_dollar_change = sp_resampled_price.pct_change().fillna(0) * benchmark_capital
+                    fig.add_trace(go.Scatter(x=sp_dollar_change.index, y=sp_dollar_change.values, name=f"S&P 500 P&L",
+                                             line=dict(color='yellow', width=2), mode='lines+markers'))
 
-                    fig.add_trace(go.Scatter(
-                        x=sp_dollar_change.index,
-                        y=sp_dollar_change.values,
-                        name=f"S&P 500 P&L (Simulated)",
-                        line=dict(color='yellow', width=2),
-                        mode='lines+markers'
-                    ))
-
-            fig.update_layout(
-                title=f"{chart_view} vs S&P 500 (Simulated Portfolio)",
-                template="plotly_dark",
-                hovermode="x unified",
-                legend=dict(orientation="h", y=1.1),
-                yaxis_title="Profit / Loss ($)"
-            )
+            fig.update_layout(template="plotly_dark", hovermode="x unified", legend=dict(orientation="h", y=1.1),
+                              yaxis_title="Profit / Loss ($)")
             st.plotly_chart(fig, width="stretch")
         else:
             st.info("No trades in this period.")
@@ -209,8 +181,7 @@ else:
         if not filtered_df.empty:
             sym_pnl = filtered_df.groupby('root_symbol')['net_pnl'].sum().sort_values()
             fig_bar = px.bar(sym_pnl, orientation='h', title="Net P&L by Ticker", color=sym_pnl.values,
-                             color_continuous_scale=['red', 'green'],
-                             labels={'value': 'Net P&L ($)', 'root_symbol': 'Ticker'})
+                             color_continuous_scale=['red', 'green'])
             st.plotly_chart(fig_bar, width="stretch")
 
     with tab_raw:
@@ -228,3 +199,97 @@ else:
         st.dataframe(open_view.sort_values('root_symbol'), width="stretch")
     else:
         st.info("No open positions.")
+
+
+# ==============================================================================
+# VIEW 2: STRATEGY LAB
+# ==============================================================================
+elif view_mode == "Strategy Lab":
+    st.title("🔬 Strategy & Campaign Analytics")
+
+    # 1. Process Data (Using FULL history to group correctly)
+    strat_df = data_service.get_strategy_data(closed_df)
+    camp_df = data_service.get_campaign_data(closed_df)
+
+    # 2. Apply Filters to the RESULTS
+    if not strat_df.empty:
+        s_mask = (strat_df['date'].dt.date >= start_date) & (strat_df['date'].dt.date <= end_date)
+        if selected_roots:
+            s_mask = s_mask & strat_df['root_symbol'].isin(selected_roots)
+        strat_view = strat_df.loc[s_mask].copy()
+    else:
+        strat_view = pd.DataFrame()
+
+    if not camp_df.empty:
+        c_mask = (camp_df['end_date'].dt.date >= start_date) & (camp_df['end_date'].dt.date <= end_date)
+        if selected_roots:
+            c_mask = c_mask & camp_df['root_symbol'].isin(selected_roots)
+        camp_view = camp_df.loc[c_mask].copy()
+    else:
+        camp_view = pd.DataFrame()
+
+    # --- TOP METRICS ---
+    c1, c2, c3 = st.columns(3)
+
+    if not strat_view.empty:
+        strat_wins = len(strat_view[strat_view['net_pnl'] > 0])
+        strat_total = len(strat_view)
+        real_win_rate = (strat_wins / strat_total * 100) if strat_total > 0 else 0
+        c1.metric("Strategy Win Rate", f"{real_win_rate:.1f}%", help="Based on grouped Spreads/Condors")
+
+    if not camp_view.empty:
+        avg_roi = camp_view['roi_annualized'].mean()
+        c2.metric("Avg Annualized ROI", f"{avg_roi:.1f}%", help="Average of all closed campaigns")
+        c3.metric("Campaigns Completed", len(camp_view))
+
+    # --- TABS ---
+    tab_campaigns, tab_spreads = st.tabs(["🎡 Wheel Campaigns", "🦋 Strategy Log"])
+
+    with tab_campaigns:
+        st.subheader("The Wheel: Campaign Performance")
+        st.markdown("*Campaigns are linked chains of Puts -> Assignments -> Covered Calls.*")
+
+        if not camp_view.empty:
+            camp_cols = ['root_symbol', 'start_date', 'end_date', 'duration_days', 'trades_count', 'total_pnl',
+                         'roi_annualized']
+            camp_display = camp_view[camp_cols].sort_values('end_date', ascending=False)
+
+            # --- FIX: ABSOLUTE SIZE FOR BUBBLES ---
+            camp_display['pnl_size'] = camp_display['total_pnl'].abs()
+
+            # --- FIX: COLOR SCALING ---
+            # Center the color scale at 0 (White/Yellow) to handle negative ROI correctly
+            max_roi = max(abs(camp_display['roi_annualized'].min()), abs(camp_display['roi_annualized'].max()))
+
+            fig_camp = px.scatter(
+                camp_display,
+                x='duration_days',
+                y='total_pnl',  # Y-Axis = Profit ($)
+                size='pnl_size',
+                color='roi_annualized',  # Color = Efficiency (%)
+                color_continuous_scale='RdYlGn',
+                range_color=[-max_roi, max_roi],  # Symmetrical scale centers 0
+                hover_data=['root_symbol', 'roi_annualized'],
+                title="Campaign P&L ($) vs Duration (Color = Annualized ROI)"
+            )
+            st.plotly_chart(fig_camp, width="stretch")
+
+            st.dataframe(camp_display.drop(columns=['pnl_size']), width="stretch")
+        else:
+            st.info("No closed campaigns found.")
+
+    with tab_spreads:
+        st.subheader("Strategy Execution Log")
+
+        if not strat_view.empty:
+            win_rates = strat_view.groupby('strategy_type').apply(
+                lambda x: len(x[x['net_pnl'] > 0]) / len(x) * 100).sort_values()
+
+            fig_type = px.bar(win_rates, orientation='h', title="Win Rate by Strategy Type",
+                              labels={'value': 'Win Rate (%)', 'strategy_type': 'Type'})
+            st.plotly_chart(fig_type, width="stretch")
+
+            st.dataframe(strat_view[['date', 'root_symbol', 'strategy_type', 'net_pnl', 'leg_count', 'close_reason']],
+                         width="stretch")
+        else:
+            st.info("No strategies found.")
