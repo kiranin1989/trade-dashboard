@@ -37,13 +37,19 @@ def parse_ibkr_xml(xml_content: str) -> dict:
                 'expiry': trade.get('expiry'),
                 'put_call': trade.get('putCall'),
                 'multiplier': multiplier,
-                'code': trade.get('notes', '')  # <--- FIXED: Map 'notes' XML attr to 'code' column
+                'code': trade.get('notes', '')
             })
 
         cash_data = []
         for ct in root.findall(".//CashTransaction"):
+            # --- FIX: Skip rows without IDs ---
+            tid = ct.get('transactionID')
+            if not tid:
+                continue
+                # ----------------------------------
+
             cash_data.append({
-                'transaction_id': ct.get('transactionID'),
+                'transaction_id': tid,
                 'type': ct.get('type'),
                 'asset_class': ct.get('assetCategory'),
                 'symbol': ct.get('symbol'),
