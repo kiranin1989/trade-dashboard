@@ -3,7 +3,8 @@ import pandas as pd
 import logging
 from config import settings
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo  # Standard in Python 3.9+
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +19,9 @@ class DatabaseManager:
         self.use_motherduck = settings.MOTHERDUCK_TOKEN is not None and len(settings.MOTHERDUCK_TOKEN) > 0
 
         if self.use_motherduck:
-            # Connect to MotherDuck
-            # We add the ?motherduck_token param, but we ALSO need to run 'USE' command later to be safe
             self.db_path = f"md:ibkr_dashboard?motherduck_token={settings.MOTHERDUCK_TOKEN}"
             logger.info("Configured for MotherDuck Cloud Database.")
         else:
-            # Fallback to local file
             self.db_path = settings.DATABASE_URL
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             logger.info(f"Configured for Local Database: {self.db_path}")
@@ -34,21 +32,17 @@ class DatabaseManager:
         if self.conn is None:
             self.conn = duckdb.connect(self.db_path)
 
-            # --- CRITICAL FIX FOR DEPLOYMENT ---
             if self.use_motherduck:
-                # Ensure we are looking at the migrated data, not the default empty DB
                 try:
                     self.conn.execute("USE ibkr_dashboard")
                 except Exception as e:
                     logger.warning(f"Could not switch context to ibkr_dashboard: {e}")
-            # -----------------------------------
 
             self._initialize_tables()
         return self.conn
 
     def _initialize_tables(self):
         conn = self.conn
-        # Trades Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 trade_id VARCHAR PRIMARY KEY,
@@ -73,7 +67,6 @@ class DatabaseManager:
                 code VARCHAR
             )
         """)
-        # Transactions Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id VARCHAR PRIMARY KEY,
@@ -86,7 +79,6 @@ class DatabaseManager:
                 currency VARCHAR
             )
         """)
-        # Market Data Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS market_data (
                 symbol VARCHAR,
@@ -95,7 +87,6 @@ class DatabaseManager:
                 PRIMARY KEY (symbol, date)
             )
         """)
-        # Metadata Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS app_metadata (
                 key VARCHAR PRIMARY KEY,
@@ -120,19 +111,34 @@ class DatabaseManager:
             conn.unregister('df_view')
 
     def record_sync_time(self):
+        """Updates the last_sync timestamp in UTC."""
         conn = self.get_connection()
-        now_str = datetime.now().isoformat()
-        conn.execute("INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('last_sync', ?)", [now_str])
+        # Store as UTC-aware datetime string
+        now_utc = datetime.now(timezone.utc)
+        conn.execute("INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('last_sync', ?)", [now_utc.isoformat()])
 
     def get_last_sync_time(self):
+        """Returns the last sync timestamp converted to NY Time."""
         conn = self.get_connection()
         try:
             res = conn.execute("SELECT value FROM app_metadata WHERE key = 'last_sync'").fetchone()
             if res:
+                # Parse the ISO string
                 dt = datetime.fromisoformat(res[0])
-                return dt.strftime("%Y-%m-%d %H:%M")
+
+                # If the stored time has no timezone (old data), assume it was UTC (Streamlit Cloud default)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+
+                # Convert to New York time
+                ny_tz = ZoneInfo("America/New_York")
+                dt_ny = dt.astimezone(ny_tz)
+
+                # Format: YYYY-MM-DD HH:MM EDT/EST
+                return dt_ny.strftime("%Y-%m-%d %H:%M %Z")
             return "Never"
-        except Exception:
+        except Exception as e:
+            logger.error(f"Time parsing error: {e}")
             return "Unknown"
 
     def close(self):
