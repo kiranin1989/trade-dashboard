@@ -6,6 +6,11 @@ logger = logging.getLogger(__name__)
 
 
 class PnLEngine:
+    """
+    Core Financial Logic.
+    Calculates Realized P&L using FIFO (First-In-First-Out) methodology.
+    """
+
     @staticmethod
     def _generate_asset_key(row):
         asset_class = str(row.get('asset_class', ''))
@@ -28,12 +33,19 @@ class PnLEngine:
             asset_key = PnLEngine._generate_asset_key(row)
             root_symbol = row.get('underlying') if row.get('underlying') else row.get('symbol')
 
+            # Capture Option Metadata for Strategy Analysis
+            # Use .get() to avoid errors if cols missing in raw data
+            meta_asset_class = row.get('asset_class')
+            meta_put_call = row.get('put_call')
+            meta_strike = row.get('strike')
+            meta_expiry = row.get('expiry')
+
             qty = float(row['quantity'])
             price = float(row['price'])
             comm = float(row['commission'])
             multiplier = float(row['multiplier']) if row.get('multiplier') and pd.notna(row['multiplier']) else 1.0
 
-            # Extract Code for Logic
+            # Check for IBKR Code (Assignment/Exercise)
             code = str(row.get('code', ''))
 
             if str(row['buy_sell']).upper() in ['SELL', 'SLD'] and qty > 0:
@@ -56,21 +68,17 @@ class PnLEngine:
                 while remaining_qty != 0 and inventory:
                     lot = inventory[0]
 
-                    # --- DETERMINE CLOSE REASON ---
-                    # 1. Check IBKR Codes first
+                    # Close Reason
                     if 'A' in code:
                         close_reason = "Assigned"
                     elif 'Ex' in code:
                         close_reason = "Exercised"
                     elif 'Ep' in code:
                         close_reason = "Expired"
+                    elif ('OPT' in str(meta_asset_class)) and price == 0.0:
+                        close_reason = "Expired"
                     else:
-                        # 2. Heuristics if codes missing or standard trade
-                        if ('OPT' in str(row.get('asset_class', ''))) and price == 0.0:
-                            close_reason = "Expired"
-                        else:
-                            close_reason = "Trade"
-                    # ------------------------------
+                        close_reason = "Trade"
 
                     if abs(remaining_qty) >= abs(lot['qty']):
                         matched_q = lot['qty']
@@ -90,7 +98,12 @@ class PnLEngine:
                             'close_date': row['trade_date'],
                             'commission': total_comm,
                             'net_pnl': net_pnl,
-                            'close_reason': close_reason
+                            'close_reason': close_reason,
+                            # NEW METADATA
+                            'asset_class': meta_asset_class,
+                            'put_call': meta_put_call,
+                            'strike': meta_strike,
+                            'expiry': meta_expiry
                         })
                     else:
                         matched_q = -remaining_qty
@@ -109,7 +122,12 @@ class PnLEngine:
                             'close_date': row['trade_date'],
                             'commission': total_comm,
                             'net_pnl': net_pnl,
-                            'close_reason': close_reason
+                            'close_reason': close_reason,
+                            # NEW METADATA
+                            'asset_class': meta_asset_class,
+                            'put_call': meta_put_call,
+                            'strike': meta_strike,
+                            'expiry': meta_expiry
                         })
                         remaining_qty = 0
                 if remaining_qty != 0:
@@ -132,7 +150,11 @@ class PnLEngine:
                     'close_date': row['date'],
                     'commission': 0.0,
                     'net_pnl': float(row['amount']),
-                    'close_reason': row['type']
+                    'close_reason': row['type'],
+                    'asset_class': 'CASH',  # Placeholder
+                    'put_call': None,
+                    'strike': None,
+                    'expiry': None
                 })
 
         # --- PART 3: CALCULATE OPEN POSITIONS ---
