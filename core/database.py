@@ -96,10 +96,14 @@ class DatabaseManager:
 
     def save_dataframe(self, table_name: str, df: pd.DataFrame):
         if df.empty: return
-        date_cols = ['trade_date', 'date']
+        date_cols = ['trade_date', 'date', 'dateTime']
         for col in date_cols:
-            if col in df.columns and df[col].dtype == 'object':
-                df[col] = pd.to_datetime(df[col], format='%Y%m%d;%H%M%S', errors='coerce')
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+
+                if df[col].dt.tz is not None:
+                    df[col] = df[col].dt.tz_localize(None)
+
         conn = self.get_connection()
         conn.register('df_view', df)
         try:
